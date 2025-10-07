@@ -2,6 +2,95 @@ import Stack from './stack';
 import Konva from "konva";
 import { createMachine, interpret } from "xstate";
 
+class Command {
+    execute() {}
+    undo() {}
+}
+
+class AddLineCommand extends Command {
+    constructor(line, layer) {
+        super();
+        this.line = line;
+        this.layer = layer;
+    }
+    execute() {
+        this.layer.add(this.line);
+        this.layer.draw();
+    }
+    undo() {
+        this.line.remove();
+        this.layer.draw();
+    }
+}
+
+// Commande concrète pour changer la couleur d'une polyline
+class ChangeColorCommand extends Command {
+    constructor(line, newColor) {
+        super();
+        this.line = line;
+        this.newColor = newColor;
+        this.oldColor = line.stroke();
+    }
+    execute() {
+        this.line.stroke(this.newColor);
+        this.line.getLayer().draw();
+    }
+    undo() {
+        this.line.stroke(this.oldColor);
+        this.line.getLayer().draw();
+    }
+}
+
+class UndoManager {
+    constructor() {
+        this.undoStack = new Stack();
+        this.redoStack = new Stack();
+        this.updateButtons(); // Met à jour l'état des boutons au démarrage
+    }
+
+    executeCmd(cmd) {
+        cmd.execute();
+        this.undoStack.push(cmd);
+        this.redoStack.clear();
+        this.updateButtons();
+    }
+
+    undo() {
+        if (!this.undoStack.isEmpty()) {
+            const cmd = this.undoStack.pop();
+            cmd.undo();
+            this.redoStack.push(cmd);
+            this.updateButtons();
+        }
+    }
+
+    redo() {
+        if (!this.redoStack.isEmpty()) {
+            const cmd = this.redoStack.pop();
+            cmd.execute();
+            this.undoStack.push(cmd);
+            this.updateButtons();
+        }
+    }
+
+    canUndo() {
+        return !this.undoStack.isEmpty();
+    }
+
+    canRedo() {
+        return !this.redoStack.isEmpty();
+    }
+
+    updateButtons() {
+        const undoButton = document.getElementById("undo");
+        const redoButton = document.getElementById("redo");
+        if (undoButton) undoButton.disabled = !this.canUndo();
+        if (redoButton) redoButton.disabled = !this.canRedo();
+    }
+}
+
+const undoManager = new UndoManager();
+
 const stage = new Konva.Stage({
     container: "container",
     width: 400,
@@ -17,10 +106,10 @@ stage.add(temporaire);
 
 const MAX_POINTS = 10;
 let polyline // La polyline en cours de construction;
+let lastAddedPolyline = null; // Pour la commande de couleur
 
 const polylineMachine = createMachine(
     {
-        /** @xstate-layout N4IgpgJg5mDOIC5QAcD2AbAngGQJYDswA6XCdMAYgFkB5AVQGUBRAYWwEkWBpAbQAYAuohSpYuAC65U+YSAAeiAIwAWAGxEArAGYAHDo0AmA3x2qNqxRoA0ITEoCciosoDsRg-Zf6DWg4pcAvgE2aFh4hETSYAAKqATi1PTMbJy8grJoYpLSsgoIFvZEOpbKij5l9jou9jZ2CIqOzm4+Ospa1YZ8qkEhGDgExFGx8YmMTLQAakz8QkggmRJSMnN5rlpE9ho69j5aWpVtLta2SnxOBjpaDRcWygZqOj3zfeGDhMP4CUywAMYAhsgwDMMqJFjkVkpVAZnNt2mV9tVfFpaohfHwigYNG0NOZVEcdAYnqF+hEALZ-fCYD7iWCjZIcbjAuYLbLLUB5RR8FzrcxaZR8YwXFyuFEIAxeIgubmqPH2eyuExtIkvAZEcmU6m02hjFKMxSzERZJa5U6qHSadp85RYy6KKqirR45xaPhdUqKO1mZTKsKq9VUuKfLVJcY0KZMw1gtnyJRlDREGVQtyGLHWlyiznnW07Uwqe6BYLPX1kikB+K077-QER55G8HsxA6AWaLmeHFVLFQh2FKoGKHy-ZaDRlAu9YvEf2aihMT5gABONZZxohCB2PalRiHpj5JlFAFpOc4PUd2splJcXDLHoXia81aWpwAhP4-ADWsGQL6B6WZoNZJoQFxFHUNp2kuGVrTxZQHWMDEsSHXF8UJG8VRLDVAxpChnzfD8vx4fUQTraNVlUZQikqTo7XsLlqhg9ECXgnEZXxRQtCCQt8FQCA4BBcdCKjAC9zUI9pVUAUvDRZETgQPdPHIvhHC8M12guZCxxJYhSHIfj-xXJwtj7PZPD8WUzR0UU-DIzFTE8UoqmAvkfQ0yJ3gwnTlwbBBTyIfZzz4DRqIJPgrgslQiGs1RbLtIDVEclDx3vdDy3c+sY1XS5JQ0BT2li6zzOkyyE0RD1gv2Kp5XYgIgA */
         id: "polyLine",
         initial: "idle",
         states: {
@@ -41,7 +130,7 @@ const polylineMachine = createMachine(
                     MOUSEMOVE: {
                         actions: "setLastPoint",
                     },
-                    Escape: { // event.key
+                    Escape: {
                         target: "idle",
                         actions: "abandon",
                     },
@@ -69,12 +158,12 @@ const polylineMachine = createMachine(
                         actions: "abandon",
                     },
 
-                    Enter: { // event.key
+                    Enter: {
                         target: "idle",
                         actions: "saveLine",
                     },
 
-                    Backspace: [ // event.key
+                    Backspace: [
                         {
                             target: "manyPoints",
                             actions: "removeLastPoint",
@@ -103,50 +192,48 @@ const polylineMachine = createMachine(
             },
             setLastPoint: (context, event) => {
                 const pos = stage.getPointerPosition();
-                const currentPoints = polyline.points(); // Get the current points of the line
+                const currentPoints = polyline.points();
                 const size = currentPoints.length;
-
-                const newPoints = currentPoints.slice(0, size - 2); // Remove the last point
+                const newPoints = currentPoints.slice(0, size - 2);
                 polyline.points(newPoints.concat([pos.x, pos.y]));
                 temporaire.batchDraw();
             },
             saveLine: (context, event) => {
-                polyline.remove(); // On l'enlève de la couche temporaire
-                const currentPoints = polyline.points(); // Get the current points of the line
+                polyline.remove();
+                const currentPoints = polyline.points();
                 const size = currentPoints.length;
-                // Le dernier point(provisoire) ne fait pas partie de la polyline
                 const newPoints = currentPoints.slice(0, size - 2);
                 polyline.points(newPoints);
-                polyline.stroke("black"); // On change la couleur
-                // On sauvegarde la polyline dans la couche de dessin
-                dessin.add(polyline); // On l'ajoute à la couche de dessin
+                polyline.stroke("black");
+                // Utilisation UndoManager
+                const cmd = new AddLineCommand(polyline, dessin);
+                undoManager.executeCmd(cmd);
+                lastAddedPolyline = polyline; // Pour la commande de couleur
             },
             addPoint: (context, event) => {
                 const pos = stage.getPointerPosition();
-                const currentPoints = polyline.points(); // Get the current points of the line
-                const newPoints = [...currentPoints, pos.x, pos.y]; // Add the new point to the array
-                polyline.points(newPoints); // Set the updated points to the line
-                temporaire.batchDraw(); // Redraw the layer to reflect the changes
+                const currentPoints = polyline.points();
+                const newPoints = [...currentPoints, pos.x, pos.y];
+                polyline.points(newPoints);
+                temporaire.batchDraw();
             },
             abandon: (context, event) => {
                 polyline.remove();
             },
             removeLastPoint: (context, event) => {
-                const currentPoints = polyline.points(); // Get the current points of the line
+                const currentPoints = polyline.points();
                 const size = currentPoints.length;
-                const provisoire = currentPoints.slice(size - 2, size); // Le point provisoire
-                const oldPoints = currentPoints.slice(0, size - 4); // On enlève le dernier point enregistré
-                polyline.points(oldPoints.concat(provisoire)); // Set the updated points to the line
-                temporaire.batchDraw(); // Redraw the layer to reflect the changes
+                const provisoire = currentPoints.slice(size - 2, size);
+                const oldPoints = currentPoints.slice(0, size - 4);
+                polyline.points(oldPoints.concat(provisoire));
+                temporaire.batchDraw();
             },
         },
         guards: {
             pasPlein: (context, event) => {
-                // On peut encore ajouter un point
                 return polyline.points().length < MAX_POINTS * 2;
             },
             plusDeDeuxPoints: (context, event) => {
-                // Deux coordonnées pour chaque point, plus le point provisoire
                 return polyline.points().length > 6;
             },
         },
@@ -175,5 +262,25 @@ window.addEventListener("keydown", (event) => {
 // bouton Undo
 const undoButton = document.getElementById("undo");
 undoButton.addEventListener("click", () => {
-    
+    undoManager.undo();
 });
+
+// bouton Redo
+const redoButton = document.getElementById("redo");
+redoButton.addEventListener("click", () => {
+    undoManager.redo();
+});
+
+// bouton pour changer la couleur de la dernière polyline ajoutée
+const colorButton = document.getElementById("color");
+if (colorButton) {
+    colorButton.addEventListener("click", () => {
+        if (lastAddedPolyline) {
+            // Choix d'une couleur aléatoire pour l'exemple
+            const colors = ["blue", "green", "orange", "purple", "pink"];
+            const newColor = colors[Math.floor(Math.random() * colors.length)];
+            const cmd = new ChangeColorCommand(lastAddedPolyline, newColor);
+            undoManager.executeCmd(cmd);
+        }
+    });
+}
